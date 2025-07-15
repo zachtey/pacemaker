@@ -142,12 +142,18 @@ def analyze_step_current(filename,
 
 # df_cur = analyze_step_current(
 #             "multivibrator1.7.txt",
-#             param_name='Rcl1',   # whatever appears in Step Information:
-#             hi_frac=0.6,          # 60 % of swing counts as HIGH
-#             lo_frac=0.2)          # 20 % counts as LOW
+#             param_name='Rcl1',  
+#             hi_frac=0.6,         
+#             lo_frac=0.2)        
 
 df_cur = analyze_step_current(
-            "multivibrator1.7.3.txt",
-            param_name='Rcl1',   # whatever appears in Step Information:
-            hi_frac=0.6,          # 60 % of swing counts as HIGH
-            lo_frac=0.2)          # 20 % counts as LOW
+            "multivibrator1.7.2.txt",
+            param_name='Rcl1',  
+            hi_frac=0.6,         
+            lo_frac=0.2)  
+
+# df_cur = analyze_step_current(
+#             "multivibrator1.7.3.txt",
+#             param_name='Rcl1',  
+#             hi_frac=0.6,        
+#             lo_frac=0.2)         
