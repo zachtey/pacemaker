@@ -128,43 +128,50 @@ $(document).ready(function(){{ $('#tbl').DataTable({{scrollY:'70vh',
     print("🟢  Table with interactive links →", html_path)
 
 
-        # ───────── scatter plots ─────────────────────────────────────────
-    ACC_CMAP = plt.cm.viridis       # 1–10 Hz → viridis,  >10 Hz → red
-    REJ_COLOR = 'grey'
-    min_on_uA = 330                 # on-current threshold for plot 2
-
-    # common colour array for accepted rows
+    # ─── adaptive colour helper (min–max of data) ───────────────────
     def _freq_colors(freq_arr):
-        col = ACC_CMAP((np.clip(freq_arr, 1, 10) - 1) / 9)
-        col[freq_arr > 10] = [1, 0, 0, 1]
-        return col
+        finite = freq_arr[np.isfinite(freq_arr)]
+        if finite.size == 0:
+            vmin, vmax = 0.0, 1.0
+        else:
+            vmin, vmax = finite.min(), finite.max()
+            if vmin == vmax:                       # flat → widen slightly
+                vmax = vmin + 1e-3
+        norm = plt.Normalize(vmin, vmax)
+        col  = plt.cm.viridis(norm(freq_arr))
+        return col, norm
 
-    # ---------------- plot 1 : Duty vs On/Off -----------------------
+    REJ_CLR   = 'grey'
+    min_on_uA = 330
+
+    # ── PLOT 1 : Duty‑cycle vs On/Off ratio ────────────────────────
     acc1 = df[~df.Rejected].reset_index(drop=True)
-    rej1 = df[df.Rejected].reset_index(drop=True)
-    col1 = _freq_colors(acc1.AvgFreq_Hz.to_numpy(float))
+    rej1 = df[df.Rejected ].reset_index(drop=True)
+
+    col1, norm1 = _freq_colors(acc1.AvgFreq_Hz.values)
 
     fig1, ax1 = plt.subplots(figsize=(6, 5))
     sc_acc1 = ax1.scatter(acc1.DutyCycle, acc1.OnOffRatio,
-                        c=col1, s=60, alpha=.9, label='Accepted')
+                        c=col1, s=80, alpha=.95,
+                        edgecolor='k', linewidth=.4, label='Accepted')
+    scatter_list1 = [sc_acc1]
+
     if show_rejected and not rej1.empty:
         sc_rej1 = ax1.scatter(rej1.DutyCycle, rej1.OnOffRatio,
-                            marker='x', color=REJ_COLOR,
-                            s=60, alpha=.8, label='Rejected')
+                            marker='x', color=REJ_CLR, s=50, alpha=.25,
+                            label='Rejected')
+        scatter_list1.append(sc_rej1)
         ax1.legend(frameon=False)
-        scatter_list1 = [sc_acc1, sc_rej1]
-    else:
-        scatter_list1 = [sc_acc1]
 
-    ax1.set(xlabel='Duty Cycle (T_on/Period)',
-            ylabel='On-Off Current Ratio (I_high/I_low)',
+    ax1.set(xlabel=r'Duty Cycle $T_{\mathrm{on}}/T_{\mathrm{period}}$',
+            ylabel=r'On‑Off Ratio $(I_{\mathrm{high}}/I_{\mathrm{low}})$',
             title='Duty vs On/Off ratio')
     ax1.grid(alpha=.3)
-    fig1.colorbar(plt.cm.ScalarMappable(cmap=ACC_CMAP,
-                                        norm=plt.Normalize(1, 10)),
-                ax=ax1, label='Avg Freq (Hz, 1–10)')
 
-    # hover plot 1
+    fig1.colorbar(plt.cm.ScalarMappable(cmap=plt.cm.viridis, norm=norm1),
+              ax=ax1,
+              label=f'Avg Freq (Hz, {norm1.vmin:.2f}–{norm1.vmax:.2f})')
+
     if interactive and mplcursors:
         cur1 = mplcursors.cursor(scatter_list1, hover=True)
         @cur1.connect("add")
@@ -180,49 +187,50 @@ $(document).ready(function(){{ $('#tbl').DataTable({{scrollY:'70vh',
                 f"Ilo {r.Low_uA:.1f} µA\n"
                 f"Ion/off {r.OnOffRatio:.2f}")
             sel.annotation.get_bbox_patch().set(fc="#ffffcc", alpha=.9)
-            if sel.annotation.arrow_patch:
-                sel.annotation.arrow_patch.set_visible(False)
+            if sel.annotation.arrow_patch: sel.annotation.arrow_patch.set_visible(False)
 
-    # ---------------- plot 2 : PW vs Off-current --------------------
+    # ── PLOT 2 : Pulse‑width vs Off‑current ────────────────────────
     df['Off_uA'] = df.Low_uA.abs()
-    qual = df[(~df.Rejected) & (df.Peak_uA >= min_on_uA)].reset_index(drop=True)
-    nonq = df[(df.Peak_uA <  min_on_uA) | df.Rejected].reset_index(drop=True)
+    qual   = df[(~df.Rejected) & (df.Peak_uA >= min_on_uA)].reset_index(drop=True)
+    nonqual= df[(df.Peak_uA  < min_on_uA) | df.Rejected    ].reset_index(drop=True)
 
-    col2 = _freq_colors(qual.AvgFreq_Hz.to_numpy(float))
+    col2, norm2 = _freq_colors(qual.AvgFreq_Hz.values)
 
     fig2, ax2 = plt.subplots(figsize=(6, 5))
+    # faint non‑qualified × first
+    ax2.scatter(nonqual.PulseWidth_s, nonqual.Off_uA,
+                marker='x', color=REJ_CLR, s=50, alpha=.25,
+                label='Not qualified', zorder=1)
+    # coloured qualified circles on top
     sc_q = ax2.scatter(qual.PulseWidth_s, qual.Off_uA,
-                    c=col2, s=60, alpha=.9, label='Ipk ≥ 330 µA')
-    sc_nq = ax2.scatter(nonq.PulseWidth_s, nonq.Off_uA,
-                        marker='x', color=REJ_COLOR,
-                        s=60, alpha=.8, label='Not qualified')
-    ax2.set(xlabel='Pulse-width T_on (s)',
-            ylabel='Off-current |I_low| (µA)',
-            title='Pulse-width vs Off-current')
-    ax2.grid(alpha=.3)
-    ax2.legend(frameon=False)
-    fig2.colorbar(plt.cm.ScalarMappable(cmap=ACC_CMAP,
-                                        norm=plt.Normalize(1, 10)),
-                ax=ax2, label='Avg Freq (Hz, 1–10)')
+                    c=col2, s=90, alpha=.95,
+                    edgecolor='k', linewidth=.4,
+                    label=f'Ipk ≥ {min_on_uA} µA', zorder=2)
 
-    # hover plot 2
+    ax2.set(xlabel=r'Pulse‑width $T_{\mathrm{on}}$ (s)',
+            ylabel=r'Off‑current $|I_{\mathrm{low}}|$ (µA)',
+            title='Pulse‑width vs Off‑current')
+    ax2.set_yscale('log')
+    ax2.grid(alpha=.3, which='both')
+    ax2.legend(frameon=False)
+
+    fig2.colorbar(plt.cm.ScalarMappable(cmap=plt.cm.viridis, norm=norm2),
+              ax=ax2,
+              label=f'Avg Freq (Hz, {norm2.vmin:.2f}–{norm2.vmax:.2f})')
+
     if interactive and mplcursors:
-        cur2 = mplcursors.cursor([sc_q, sc_nq], hover=True)
+        cur2 = mplcursors.cursor([sc_q], hover=True)  # hover only on qualified hits
         @cur2.connect("add")
         def _(sel):
-            src = qual if sel.artist is sc_q else nonq
-            r   = src.iloc[sel.index]
-            lab = "" if sel.artist is sc_q else " (not qual.)"
+            r = qual.iloc[sel.index]
             sel.annotation.set_text(
-                f"Run {int(r.RunID)}{lab}\n"
+                f"Run {int(r.RunID)}\n"
                 f"{r.AvgFreq_Hz:.2f} Hz\n"
                 f"PW  {r.PulseWidth_s:.3e} s\n"
-                f"Ipk {r.Peak_uA:.1f} µA\n"
                 f"Ilo {r.Off_uA:.1f} µA\n"
                 f"Duty {r.DutyCycle:.3f}")
             sel.annotation.get_bbox_patch().set(fc="#ffffcc", alpha=.9)
-            if sel.annotation.arrow_patch:
-                sel.annotation.arrow_patch.set_visible(False)
+            if sel.annotation.arrow_patch: sel.annotation.arrow_patch.set_visible(False)
 
     plt.tight_layout()
     plt.show()
