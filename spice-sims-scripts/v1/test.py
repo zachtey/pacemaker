@@ -1,8 +1,19 @@
-import numpy as np, matplotlib.pyplot as plt, mplcursors
+import matplotlib.pyplot as plt
+import numpy as np
 
-x = np.linspace(0, 2*np.pi, 20)
+# Create sample data
+x = np.linspace(0, 10, 100)
 y = np.sin(x)
-fig, ax = plt.subplots()
-sc = ax.scatter(x, y, c=y, cmap='viridis')
-mplcursors.cursor(sc, hover=True)
+
+# Create the plot
+plt.figure(figsize=(8, 6))
+plt.plot(x, y)
+plt.title('Sine Wave Plot')
+plt.xlabel('X-axis')
+plt.ylabel('Y-axis')
+
+# Save the plot as an SVG file
+plt.savefig('sine_wave_plot.svg', format='svg')
+
+# Optionally, display the plot
 plt.show()

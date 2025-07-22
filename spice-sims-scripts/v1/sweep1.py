@@ -3,6 +3,7 @@ from scipy.signal import find_peaks
 import plotly.offline as pyo, plotly.graph_objs as go
 try: import mplcursors
 except ModuleNotFoundError: mplcursors = None
+from pathlib import Path
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -13,6 +14,7 @@ def sweep_onoff_vs_pw(
         thresh: float = 0.05,
         show_rejected: bool = False,      
         interactive: bool = True):
+    
 
     # ── helpers ──────────────────────────────────────────────
     def one_peak(sig, hi, lo):
@@ -25,8 +27,28 @@ def sweep_onoff_vs_pw(
 
     stab = lambda a: np.std(a)/np.mean(a) if len(a)>1 and np.mean(a) else np.nan
     rows = []
-    out_dir = os.path.join(os.path.dirname(filename), "waveforms")
-    os.makedirs(out_dir, exist_ok=True)
+
+    fp = Path(filename)
+    if not fp.is_file():                       # not where we were called from …
+        fp = fp.parent / "raw" / fp.name       # … so try sibling "raw/" dir
+    filename = str(fp)                         # keep the rest of the code happy
+
+    src_path   = Path(filename).expanduser().resolve()
+    ver_match  = re.search(r'(\d+(?:\.\d+)+)$', src_path.stem)      # e.g. 1.8.1
+    ver_folder = ver_match.group(1) if ver_match else src_path.stem
+    # out_base   = src_path.parent / ver_folder                      # “…/1.8.1/”
+    # wf_dir     = out_base / "waveforms"
+    # out_base.mkdir(parents=True, exist_ok=True)
+    # wf_dir.mkdir(exist_ok=True)
+    base_dir = src_path.parent
+    if base_dir.name == "raw":        # the .txt lives in raw/
+        base_dir = base_dir.parent    # step one level up
+
+    out_base = base_dir / ver_folder          # e.g. “…/1.8.1/”
+    wf_dir   = out_base / "waveforms"
+    out_base.mkdir(parents=True, exist_ok=True)
+    wf_dir.mkdir(exist_ok=True)
+
 
     def save_plotly_wave(t, i, run_id):
         fig = go.Figure(go.Scatter(x=t, y=i*1e6, mode='lines',
@@ -34,10 +56,9 @@ def sweep_onoff_vs_pw(
         fig.update_layout(title=f'Run {run_id} – Current vs Time',
                           xaxis_title='Time (s)', yaxis_title='Current (µA)',
                           template="simple_white", height=450, width=850)
-        path = os.path.join(out_dir, f"run_{run_id}.html")
-        pyo.plot(fig, filename=path, auto_open=False,
-                 include_plotlyjs='cdn')
-        return path
+        path = wf_dir / f"run_{run_id}.html"
+        pyo.plot(fig, filename=str(path), auto_open=False, include_plotlyjs='cdn')
+        return f"waveforms/{path.name}"          # ← relative link for the table
 
     # ── analyse one step block ───────────────────────────────
     def analyse_block(rid, t, i, prm):
@@ -108,7 +129,8 @@ def sweep_onoff_vs_pw(
     df = pd.DataFrame(rows)
 
     # ── write scrollable DataTables HTML ───────────────────────
-    html_path = os.path.splitext(filename)[0] + "_table.html"
+    # html_path = os.path.splitext(filename)[0] + "_table.html"
+    html_path = out_base / f"{ver_folder}_table.html"
     with open(html_path,'w') as f:
         f.write(f"""<!DOCTYPE html><html><head>
 <link rel="stylesheet"
@@ -233,11 +255,21 @@ $(document).ready(function(){{ $('#tbl').DataTable({{scrollY:'70vh',
             if sel.annotation.arrow_patch: sel.annotation.arrow_patch.set_visible(False)
 
     plt.tight_layout()
+
+        # ── SAVE PLOTS AS SVG ─────────────────────────────────────
+    fig1.savefig(out_base / "duty_vs_onoff.svg",
+                 format="svg", bbox_inches='tight')
+    fig2.savefig(out_base / "pw_vs_offcurrent.svg",
+                 format="svg", bbox_inches='tight')
+    
+
+    
     plt.show()
     return df
 
-
 if __name__ == "__main__":
-    sweep_onoff_vs_pw("multivibrator1.8.3.txt",
+    sweep_onoff_vs_pw("multivibrator1.9.3.txt",
                       show_rejected=True,      # grey × markers
                       interactive=True)
+
+
