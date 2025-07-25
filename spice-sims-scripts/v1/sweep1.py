@@ -4,6 +4,7 @@ import plotly.offline as pyo, plotly.graph_objs as go
 try: import mplcursors
 except ModuleNotFoundError: mplcursors = None
 from pathlib import Path
+from sklearn.cluster import KMeans
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -11,7 +12,7 @@ def sweep_onoff_vs_pw(
         filename: str,
         hi_fracs=(0.6, 0.5, 0.4, 0.3),
         lo_frac: float = 0.2,
-        thresh: float = 0.05,
+        thresh: float =0.15,  # threshold for stability metrics
         show_rejected: bool = False,      
         interactive: bool = True):
     
@@ -74,6 +75,7 @@ def sweep_onoff_vs_pw(
         if pk.size < 2:
             duty = tone = onoff = np.nan
             f_mean = f_std = per_std = np.nan
+            Ion_avg = charge = np.nan
         else:
             per, freq = np.diff(t[pk]), 1/np.diff(t[pk])
             f_mean, f_std, per_std = freq.mean(), freq.std(), per.std()
@@ -89,23 +91,32 @@ def sweep_onoff_vs_pw(
             duty   = np.nanmean(duties)
             tone   = np.nanmean(tones)
             onoff  = np.nanmean(ior)
+            Ion_avg = i[i >= hi].mean() if np.isfinite(tone) else np.nan
+            charge  = tone * Ion_avg if np.isfinite(Ion_avg) else np.nan
 
         row = dict(RunID=rid, **prm,
-                   AvgFreq_Hz=f_mean,
-                   Jitter_s=per_std,
-                   Stability=f_std/f_mean if f_mean else np.nan,
-                   DutyCycle=duty,
-                   Duty_Stability = stab(duties) if pk.size else np.nan,
-                   PulseWidth_s   = tone,
-                   OnOffRatio     = onoff,
-                   OnOff_Stability= stab(ior)    if pk.size else np.nan,
-                   Peak_uA=i.max()*1e6,
-                   Low_uA =i.min()*1e6)
+               AvgFreq_Hz=f_mean,
+               Jitter_s=per_std,
+               Stability=f_std/f_mean if f_mean else np.nan,
+               DutyCycle=duty,
+               Duty_Stability = stab(duties) if pk.size else np.nan,
+               PulseWidth_s   = tone,
+               OnOffRatio     = onoff,
+               OnOff_Stability= stab(ior)    if pk.size else np.nan,
+               Peak_uA=i.max()*1e6,
+               Low_uA =i.min()*1e6,
+               PulseCharge_C  = charge)
 
-        row['Rejected'] = any(row[k] > thresh for k in
-                              ('Jitter_s','Stability',
-                               'Duty_Stability','OnOff_Stability')
-                               if not np.isnan(row[k]))
+        # ---- Updated rejection logic ----
+        key_metrics = ['AvgFreq_Hz','DutyCycle','PulseWidth_s','OnOffRatio']
+        nan_or_freq = (any(np.isnan(row.get(k, np.nan)) for k in key_metrics) or
+                    (not np.isnan(row.get('AvgFreq_Hz', np.nan)) and row['AvgFreq_Hz'] > 10))
+
+        thresh_reject = any(row[k] > thresh for k in
+                            ('Jitter_s','Stability','Duty_Stability','OnOff_Stability')
+                            if not np.isnan(row[k]))
+
+        row['Rejected'] = nan_or_freq or thresh_reject
         # generate plot for every run
         row['Plot'] = f'<a href="{save_plotly_wave(t, i, rid)}" target="_blank">Plot</a>'
         rows.append(row)
@@ -127,6 +138,7 @@ def sweep_onoff_vs_pw(
     if buf_t: analyse_block(rid, np.asarray(buf_t), np.asarray(buf_i), prm)
 
     df = pd.DataFrame(rows)
+    df['Charge_uC'] = df.PulseCharge_C * 1e6
 
     # ── write scrollable DataTables HTML ───────────────────────
     # html_path = os.path.splitext(filename)[0] + "_table.html"
@@ -164,7 +176,7 @@ $(document).ready(function(){{ $('#tbl').DataTable({{scrollY:'70vh',
         return col, norm
 
     REJ_CLR   = 'grey'
-    min_on_uA = 330
+    min_on_uA = 100  # Minimum peak current to consider a run qualified
 
     # ── PLOT 1 : Duty‑cycle vs On/Off ratio ────────────────────────
     acc1 = df[~df.Rejected].reset_index(drop=True)
@@ -180,10 +192,13 @@ $(document).ready(function(){{ $('#tbl').DataTable({{scrollY:'70vh',
 
     if show_rejected and not rej1.empty:
         sc_rej1 = ax1.scatter(rej1.DutyCycle, rej1.OnOffRatio,
-                            marker='x', color=REJ_CLR, s=50, alpha=.25,
-                            label='Rejected')
+                              marker='x', color=REJ_CLR, s=50, alpha=.25,
+                              label='Rejected', zorder=1)
         scatter_list1.append(sc_rej1)
-        ax1.legend(frameon=False)
+
+    # Always draw colored points on top
+    sc_acc1.set_zorder(2)
+    ax1.legend(frameon=False)
 
     ax1.set(xlabel=r'Duty Cycle $T_{\mathrm{on}}/T_{\mathrm{period}}$',
             ylabel=r'On‑Off Ratio $(I_{\mathrm{high}}/I_{\mathrm{low}})$',
@@ -195,21 +210,30 @@ $(document).ready(function(){{ $('#tbl').DataTable({{scrollY:'70vh',
               label=f'Avg Freq (Hz, {norm1.vmin:.2f}–{norm1.vmax:.2f})')
 
     if interactive and mplcursors:
-        cur1 = mplcursors.cursor(scatter_list1, hover=True)
+        cur1 = mplcursors.cursor([sc_acc1, sc_rej1] if show_rejected else [sc_acc1], hover=True)
         @cur1.connect("add")
         def _(sel):
             src = acc1 if sel.artist is sc_acc1 else rej1
             r   = src.iloc[sel.index]
-            lab = "" if sel.artist is sc_acc1 else " (rejected)"
+            reason = []
+            if any(np.isnan(r[k]) for k in ['AvgFreq_Hz','DutyCycle','PulseWidth_s','OnOffRatio']):
+                reason.append("NaN values")
+            if not np.isnan(r.AvgFreq_Hz) and r.AvgFreq_Hz > 10:
+                reason.append(">10 Hz")
+            if r.Rejected and not reason:
+                reason.append("Stability threshold")
+
+            reason_txt = f"\nRejected: {', '.join(reason)}" if r.Rejected else ""
             sel.annotation.set_text(
-                f"Run {int(r.RunID)}{lab}\n"
+                f"Run {int(r.RunID)}{reason_txt}\n"
                 f"{r.AvgFreq_Hz:.2f} Hz\n"
                 f"Duty {r.DutyCycle:.3f}\n"
                 f"Ipk {r.Peak_uA:.1f} µA\n"
                 f"Ilo {r.Low_uA:.1f} µA\n"
                 f"Ion/off {r.OnOffRatio:.2f}")
             sel.annotation.get_bbox_patch().set(fc="#ffffcc", alpha=.9)
-            if sel.annotation.arrow_patch: sel.annotation.arrow_patch.set_visible(False)
+            if sel.annotation.arrow_patch:
+                sel.annotation.arrow_patch.set_visible(False)
 
     # ── PLOT 2 : Pulse‑width vs Off‑current ────────────────────────
     df['Off_uA'] = df.Low_uA.abs()
@@ -241,18 +265,98 @@ $(document).ready(function(){{ $('#tbl').DataTable({{scrollY:'70vh',
               label=f'Avg Freq (Hz, {norm2.vmin:.2f}–{norm2.vmax:.2f})')
 
     if interactive and mplcursors:
-        cur2 = mplcursors.cursor([sc_q], hover=True)  # hover only on qualified hits
+        cur2 = mplcursors.cursor([sc_q, ax2.collections[0]], hover=True)  # qualified + grey X's
         @cur2.connect("add")
         def _(sel):
-            r = qual.iloc[sel.index]
+            src = qual if sel.artist is sc_q else nonqual
+            r   = src.iloc[sel.index]
+            reason = []
+            if any(np.isnan(r[k]) for k in ['AvgFreq_Hz','DutyCycle','PulseWidth_s','OnOffRatio']):
+                reason.append("NaN values")
+            if not np.isnan(r.AvgFreq_Hz) and r.AvgFreq_Hz > 10:
+                reason.append(">10 Hz")
+            if r.Peak_uA < min_on_uA:
+                reason.append("Low peak current")
+            if r.Rejected and not reason:
+                reason.append("Stability threshold")
+
+            reason_txt = f"\nRejected: {', '.join(reason)}" if (r.Rejected or reason) else ""
             sel.annotation.set_text(
-                f"Run {int(r.RunID)}\n"
+                f"Run {int(r.RunID)}{reason_txt}\n"
                 f"{r.AvgFreq_Hz:.2f} Hz\n"
                 f"PW  {r.PulseWidth_s:.3e} s\n"
                 f"Ilo {r.Off_uA:.1f} µA\n"
                 f"Duty {r.DutyCycle:.3f}")
             sel.annotation.get_bbox_patch().set(fc="#ffffcc", alpha=.9)
-            if sel.annotation.arrow_patch: sel.annotation.arrow_patch.set_visible(False)
+            if sel.annotation.arrow_patch:
+                sel.annotation.arrow_patch.set_visible(False)
+
+
+
+
+    # ── PLOT 3 : Charge vs Off‑current ────────────────────────────
+    acc3 = df[~df.Rejected].reset_index(drop=True)
+    rej3 = df[df.Rejected ].reset_index(drop=True)
+
+    col3, norm3 = _freq_colors(acc3.AvgFreq_Hz.values)
+
+    fig3, ax3 = plt.subplots(figsize=(6, 5))
+
+    # Draw rejected (grey x) points first, behind accepted
+    if show_rejected and not rej3.empty:
+        ax3.scatter(rej3.Charge_uC, rej3.Off_uA,
+                    marker='x', color=REJ_CLR, s=50, alpha=.25,
+                    label='Rejected', zorder=1)
+
+    # Draw accepted (colored) points on top
+    sc_acc3 = ax3.scatter(acc3.Charge_uC, acc3.Off_uA,
+                          c=col3, s=80, alpha=.95,
+                          edgecolor='k', linewidth=.4,
+                          label='Accepted', zorder=2)
+
+    ax3.set(xlabel=r'Charge per pulse $Q$ (µC)',
+            ylabel=r'Off‑current $|I_{\mathrm{low}}|$ (µA)',
+            title='Charge vs Off‑current')
+    ax3.set_xscale('linear')
+    ax3.set_yscale('log')
+    ax3.grid(alpha=.3, which='both')
+    ax3.legend(frameon=False)
+
+    fig3.colorbar(plt.cm.ScalarMappable(cmap=plt.cm.viridis, norm=norm3),
+                  ax=ax3,
+                  label=f'Avg Freq (Hz, {norm3.vmin:.2f}–{norm3.vmax:.2f})')
+
+    # optional hover labels
+    if interactive and mplcursors:
+        # Accepted (colored) + Rejected (grey) points
+        sc_rej3 = None
+        if show_rejected and not rej3.empty:
+            sc_rej3 = ax3.collections[0]  # first scatter is the grey X's
+
+        cur3 = mplcursors.cursor(
+            [sc_acc3, sc_rej3] if sc_rej3 else [sc_acc3], hover=True
+        )
+        @cur3.connect("add")
+        def _(sel):
+            src = acc3 if sel.artist is sc_acc3 else rej3
+            r   = src.iloc[sel.index]
+            reason = []
+            if any(np.isnan(r[k]) for k in ['AvgFreq_Hz','DutyCycle','PulseWidth_s','OnOffRatio']):
+                reason.append("NaN values")
+            if not np.isnan(r.AvgFreq_Hz) and r.AvgFreq_Hz > 10:
+                reason.append(">10 Hz")
+            if r.Rejected and not reason:
+                reason.append("Stability threshold")
+
+            reason_txt = f"\nRejected: {', '.join(reason)}" if r.Rejected else ""
+            sel.annotation.set_text(
+                f"Run {int(r.RunID)}{reason_txt}\n"
+                f"{r.AvgFreq_Hz:.2f} Hz\n"
+                f"Charge {r.Charge_uC:.3e} µC\n"
+                f"Ilo {r.Off_uA:.1f} µA")
+            sel.annotation.get_bbox_patch().set(fc="#ffffcc", alpha=.9)
+            if sel.annotation.arrow_patch:
+                sel.annotation.arrow_patch.set_visible(False)
 
     plt.tight_layout()
 
@@ -261,15 +365,56 @@ $(document).ready(function(){{ $('#tbl').DataTable({{scrollY:'70vh',
                  format="svg", bbox_inches='tight')
     fig2.savefig(out_base / "pw_vs_offcurrent.svg",
                  format="svg", bbox_inches='tight')
+    fig3.savefig(out_base / "charge_vs_offcurrent.svg",
+                 format="svg", bbox_inches='tight')  
     
+        # ── Find and cluster runs near 6 µC ─────────────────────────────
+    target_charge = 6.0   # µC target
+    target_freq   = 1.5   # Hz target
+    num_near      = 20    # Keep 20 closest runs for clustering
+    n_clusters    = 3     # Number of clusters (can adjust)
+
+    if {'Charge_uC','AvgFreq_Hz'}.issubset(df.columns) and df[['Charge_uC','AvgFreq_Hz']].notna().any().any():
+        # Calculate distance to target for sorting
+        df['Distance'] = np.sqrt((df['Charge_uC'] - target_charge)**2 +
+                                 (df['AvgFreq_Hz'] - target_freq)**2)
+        near_df = df.sort_values('Distance').head(num_near).copy()
+
+        # Prepare features for clustering (charge and frequency)
+        features = near_df[['Charge_uC','AvgFreq_Hz']].to_numpy()
+
+        # Run KMeans
+        kmeans = KMeans(n_clusters=n_clusters, random_state=0)
+        near_df['Cluster'] = kmeans.fit_predict(features)
+
+        # Summarize each cluster
+        cluster_summary = near_df.groupby('Cluster').apply(
+            lambda g: pd.Series({
+                'ClusterCenter_Charge_uC': g['Charge_uC'].mean(),
+                'ClusterCenter_Freq_Hz':   g['AvgFreq_Hz'].mean(),
+                'RunIDs': ', '.join(g['RunID'].astype(str)),
+                'RejectedRuns': ', '.join(g.loc[g['Rejected'], 'RunID'].astype(str)),
+                'AcceptedRuns': ', '.join(g.loc[~g['Rejected'], 'RunID'].astype(str))
+            })
+        ).reset_index()
+
+        # Save outputs
+        near_df_path = out_base / f"closest_to_{target_charge}uC_{target_freq}Hz_detailed.csv"
+        summary_path = out_base / f"closest_to_{target_charge}uC_{target_freq}Hz_summary.csv"
+        near_df.to_csv(near_df_path, index=False)
+        cluster_summary.to_csv(summary_path, index=False)
+        print(f"🟢  Saved closest runs to ({target_charge} µC, {target_freq} Hz):")
+        print(f"     Detailed list → {near_df_path}")
+        print(f"     Cluster summary → {summary_path}")
+
 
     
     plt.show()
     return df
 
+
+
 if __name__ == "__main__":
-    sweep_onoff_vs_pw("multivibrator1.9.3.txt",
+    sweep_onoff_vs_pw("multivibrator1.9.5.txt",
                       show_rejected=True,      # grey × markers
                       interactive=True)
-
-
